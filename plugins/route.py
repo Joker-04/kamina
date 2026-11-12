@@ -29,7 +29,17 @@ routes = web.RouteTableDef()
 async def movie_catalogue(request: web.Request):
     """Render a download-only catalogue from the bot's existing indexed files."""
     query = (request.query.get("q") or "").strip()[:100]
-    criteria = {"file_name": re.compile(re.escape(query), re.IGNORECASE)} if query else {}
+    query_pattern = re.compile(re.escape(query), re.IGNORECASE) if query else None
+    criteria = {}
+    if query_pattern:
+        matching_metadata = await catalogue_collection.find(
+            {"title": query_pattern}, {"file_id": 1}
+        ).to_list(length=500)
+        matching_ids = [entry["file_id"] for entry in matching_metadata]
+        criteria = {"$or": [
+            {"file_name": query_pattern},
+            {"file_id": {"$in": matching_ids}},
+        ]}
 
     try:
         total = await Media.count_documents(criteria)
