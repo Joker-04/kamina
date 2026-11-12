@@ -35,9 +35,12 @@ def clean_movie_title(file_name, caption=None):
 
 async def _fetch_and_store_metadata(file_id, title, file_name):
     try:
-        # Cinemagoer is synchronous; run it off the bot's asyncio event loop.
+        # get_movie_details is async, while Cinemagoer does blocking work.
+        # Run its coroutine in a worker thread so the bot event loop stays responsive.
         async with _metadata_lock:
-            details = await asyncio.to_thread(get_movie_details, title, False, file_name)
+            details = await asyncio.to_thread(
+                lambda: asyncio.run(get_movie_details(title, False, file_name))
+            )
 
         if not details:
             await catalogue_collection.update_one(
@@ -57,7 +60,7 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
             "languages": details.get("languages") or "",
             "imdb_url": details.get("url"),
             "metadata_updated_at": datetime.now(timezone.utc),
-            "metadata_status": "ready",
+            "metadata_status": "ready" if details.get("poster_url") else "no_poster",
         }
         await catalogue_collection.update_one(
             {"file_id": file_id},
