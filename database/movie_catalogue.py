@@ -13,24 +13,36 @@ _background_tasks = set()
 
 
 def clean_movie_title(file_name, caption=None):
-    """Use an explicit Title: caption when present; otherwise clean the filename."""
+    """Extract a searchable title from an explicit Title: caption or filename."""
     if caption:
-        match = re.search(r"(?im)^\\s*/?title\\s*:\\s*(.+?)\\s*$", str(caption))
+        match = re.search(r"(?im)^\s*/?title\s*:\s*(.+?)\s*$", str(caption))
         if match:
-            return match.group(1).strip()
+            explicit_title = match.group(1).strip()
+            if explicit_title:
+                return explicit_title
 
     title = str(file_name or "Untitled")
-    title = re.sub(r"(?i)\\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
+
+    # Remove common file extensions.
+    title = re.sub(r"(?i)\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
+
+    # Remove uploader handles and common release tags before searching IMDb.
+    title = re.sub(r"(?i)@\w+", " ", title)
+    title = re.sub(r"[\[\](){}]", " ", title)
     title = re.sub(
-        r"(?i)\\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
-        r"web[ -]?dl|webrip|hdrip|brrip|dvdrip|hdtv|x264|x265|hevc|aac|"
-        r"10bit|5\\.1|2\\.0)\\b.*$",
+        r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
+        r"web[ -]?dl|webrip|hdrip|brrip|dvdrip|hdtv|hdtc|x264|x265|hevc|aac|"
+        r"10bit|5\.1|2\.0|cleaned|proper|repack)\b.*$",
         "",
         title,
     )
-    title = re.sub(r"[._+\\-]+", " ", title)
-    title = re.sub(r"[\\[\\](){}]", " ", title)
-    return re.sub(r"\\s+", " ", title).strip() or "Untitled"
+
+    # Remove leading quality labels if they occur before the actual title.
+    title = re.sub(r"(?i)^\s*(2160p|1440p|1080p|720p|480p|360p|4k|8k)\s*[-•:|]*\s*", "", title)
+
+    title = re.sub(r"[._+\-•|:]+", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    return title or "Untitled"
 
 
 async def _fetch_and_store_metadata(file_id, title, file_name):
