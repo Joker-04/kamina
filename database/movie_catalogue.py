@@ -30,7 +30,6 @@ def clean_movie_title(file_name, caption=None):
         "",
         title,
     )
-    # Keep the year but discard trailing language/uploader/release labels.
     year_match = re.search(r"\b(?:19|20)\d{2}\b", title)
     if year_match:
         title = title[:year_match.end()]
@@ -46,12 +45,12 @@ def clean_movie_title(file_name, caption=None):
 
 async def _fetch_and_store_metadata(file_id, title, file_name):
     try:
-        logger.info("Starting IMDb/TMDb metadata lookup: title=%r file_name=%r", title, file_name)
+        logger.info("Starting IMDb/TVmaze metadata lookup: title=%r file_name=%r", title, file_name)
         async with _metadata_lock:
             details = await get_movie_details(title, False, file_name)
 
         if not details:
-            logger.warning("IMDb and TMDb returned no match for new upload: title=%r", title)
+            logger.warning("IMDb and TVmaze returned no match for new upload: title=%r", title)
             await catalogue_collection.update_one(
                 {"file_id": file_id},
                 {"$set": {"metadata_status": "no_match"}},
@@ -59,6 +58,8 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
             return
 
         poster_url = details.get("poster_url")
+        source_url = details.get("url") or ""
+        metadata_source = "tvmaze" if "tvmaze.com" in source_url else "imdb"
         values = {
             "title": details.get("title") or title,
             "year": details.get("year"),
@@ -68,10 +69,10 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
             "imdb_id": details.get("imdb_id"),
             "rating": details.get("rating"),
             "languages": details.get("languages") or "",
-            "imdb_url": details.get("url"),
+            "imdb_url": source_url,
             "metadata_updated_at": datetime.now(timezone.utc),
             "metadata_status": "ready" if poster_url else "no_poster",
-            "metadata_source": "tmdb" if details.get("url", "").startswith("https://www.themoviedb.org/") else "imdb",
+            "metadata_source": metadata_source,
         }
         await catalogue_collection.update_one(
             {"file_id": file_id},
