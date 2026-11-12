@@ -15,22 +15,22 @@ _background_tasks = set()
 def clean_movie_title(file_name, caption=None):
     """Use an explicit Title: caption when present; otherwise clean the filename."""
     if caption:
-        match = re.search(r"(?im)^\\s*/?title\\s*:\\s*(.+?)\\s*$", str(caption))
+        match = re.search(r"(?im)^\s*/?title\s*:\s*(.+?)\s*$", str(caption))
         if match:
             return match.group(1).strip()
 
     title = str(file_name or "Untitled")
-    title = re.sub(r"(?i)\\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
+    title = re.sub(r"(?i)\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
     title = re.sub(
-        r"(?i)\\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
+        r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
         r"web[ -]?dl|webrip|hdrip|brrip|dvdrip|hdtv|x264|x265|hevc|aac|"
-        r"10bit|5\\.1|2\\.0)\\b.*$",
+        r"10bit|5\.1|2\.0)\b.*$",
         "",
         title,
     )
-    title = re.sub(r"[._+\\-]+", " ", title)
-    title = re.sub(r"[\\[\\](){}]", " ", title)
-    return re.sub(r"\\s+", " ", title).strip() or "Untitled"
+    title = re.sub(r"[._+\-]+", " ", title)
+    title = re.sub(r"[\[\](){}]", " ", title)
+    return re.sub(r"\s+", " ", title).strip() or "Untitled"
 
 
 async def _fetch_and_store_metadata(file_id, title, file_name):
@@ -40,6 +40,10 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
             details = await asyncio.to_thread(get_movie_details, title, False, file_name)
 
         if not details:
+            await catalogue_collection.update_one(
+                {"file_id": file_id},
+                {"$set": {"metadata_status": "no_match"}},
+            )
             return
 
         values = {
@@ -53,6 +57,7 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
             "languages": details.get("languages") or "",
             "imdb_url": details.get("url"),
             "metadata_updated_at": datetime.now(timezone.utc),
+            "metadata_status": "ready",
         }
         await catalogue_collection.update_one(
             {"file_id": file_id},
