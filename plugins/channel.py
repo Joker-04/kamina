@@ -23,5 +23,5 @@ async def media(bot, message):
     # Only publish newly indexed files. Existing duplicates are left untouched.
     if saved:
         file_id, _ = unpack_new_file_id(media.file_id)
-        caption = message.caption.html if message.caption else None
+        caption = getattr(message.caption, "html", message.caption) if message.caption else None
         await publish_movie(file_id, media.file_name, media.file_size, caption)
