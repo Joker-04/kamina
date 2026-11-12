@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#090b12"><title>{{ site_name }} · My Movies</title>
+<style>
+:root{color-scheme:dark;--bg:#090b12;--panel:#121622;--muted:#9aa4b5;--line:#242b3a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 20% -10%,#28204a 0,transparent 38%),var(--bg);color:#f7f7fb;font:15px/1.5 Inter,system-ui,-apple-system,Segoe UI,sans-serif}
+a{color:inherit;text-decoration:none}.wrap{width:min(1180px,92%);margin:auto}.top{position:sticky;top:0;z-index:5;background:#090b12ef;border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
+.nav{height:72px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-weight:900;font-size:23px;letter-spacing:2px}.brand span{color:#a78bfa}.navlinks{display:flex;gap:22px;color:#c4c9d4}.navlinks a:hover,.navlinks a.active{color:#c4b5fd}
+.hero{padding:54px 0 30px}.eyebrow{color:#c4b5fd;font-size:12px;font-weight:800;letter-spacing:2px;text-transform:uppercase}.hero h1{font-size:clamp(32px,5vw,54px);line-height:1.05;margin:10px 0}.hero p{color:var(--muted);max-width:620px;margin:12px 0 24px}
+.search{display:flex;max-width:650px;gap:10px}.search input{flex:1;min-width:0;background:#141927;border:1px solid #30384a;border-radius:12px;padding:14px 16px;color:white;font:inherit;outline:none}.search input:focus{border-color:#9b7bff}.search button,.download{border:0;border-radius:11px;background:linear-gradient(135deg,#8b5cf6,#6d4aff);color:white;padding:12px 19px;font-weight:800;cursor:pointer}
+.sectionhead{display:flex;align-items:end;justify-content:space-between;margin:26px 0 16px}.sectionhead h2{margin:0;font-size:23px}.count{font-size:13px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:18px;padding-bottom:58px}.card{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden;transition:transform .18s,border-color .18s}.card:hover{transform:translateY(-4px);border-color:#7658c9}
+.poster{aspect-ratio:2/3;background:linear-gradient(145deg,#24213a,#151b2a 55%,#30204b);display:grid;place-items:center;overflow:hidden}.poster img{width:100%;height:100%;object-fit:cover}.placeholder{font-size:42px;color:#a78bfa;font-weight:900}
+.meta{padding:12px}.title{font-size:14px;font-weight:750;line-height:1.35;min-height:38px;overflow-wrap:anywhere}.size{font-size:12px;color:var(--muted);margin:7px 0 12px}.download{display:block;text-align:center;padding:9px 10px;font-size:13px}
+.empty{border:1px dashed #394155;border-radius:16px;padding:36px;text-align:center;color:var(--muted);grid-column:1/-1}.footer{border-top:1px solid var(--line);padding:24px 0;color:var(--muted);font-size:13px}
+@media(max-width:560px){.nav{height:62px}.navlinks{gap:13px;font-size:13px}.hero{padding-top:38px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.search button{padding-inline:14px}}
+</style></head>
+<body>
+<header class="top"><div class="wrap nav"><a class="brand" href="/">KAMINA<span>.</span></a><nav class="navlinks"><a class="active" href="/">Home</a><a href="/movies">My Movies</a></nav></div></header>
+<main class="wrap"><section class="hero"><div class="eyebrow">Your movie library</div><h1>Find your next<br><span style="color:#c4b5fd">favourite movie.</span></h1><p>Browse the available catalogue and get your files directly through our Telegram download bot.</p>
+<form class="search" action="/movies" method="get"><input name="q" value="{{ query }}" placeholder="Search movies by title..." aria-label="Search movies"><button type="submit">Search</button></form></section>
+<section><div class="sectionhead"><h2>{% if query %}Search results{% else %}My Movies{% endif %}</h2><span class="count">{{ total }} files indexed</span></div><div class="grid">
+{% for movie in movies %}<article class="card"><div class="poster">{% if movie.poster_url %}<img src="{{ movie.poster_url }}" alt="{{ movie.file_name }}" loading="lazy">{% else %}<div class="placeholder">K</div>{% endif %}</div><div class="meta"><div class="title">{{ movie.file_name }}</div><div class="size">{{ movie.file_size_text }}</div><a class="download" href="{{ movie.download_url }}" target="_blank" rel="noopener">↓ Get Download</a></div></article>
+{% else %}<div class="empty"><strong>No movies found.</strong><br>Try another title or index files through your Telegram bot.</div>{% endfor %}
+</div></section></main><footer class="footer"><div class="wrap">KAMINA · Download catalogue · Only distribute files you have permission to share.</div></footer>
+</body></html>
