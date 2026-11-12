@@ -13,13 +13,58 @@ from util.custom_dl import ByteStreamer
 from util.time_format import get_readable_time
 from util.render_template import render_page
 from info import *
+from database.ia_filterdb import Media
+from utils import temp
+from util.human_readable import humanbytes
+import jinja2
 
 
 routes = web.RouteTableDef()
 
 @routes.get("/", allow_head=True)
-async def root_route_handler(request):
-    return web.json_response("BenFilterBot")
+@routes.get("/movies", allow_head=True)
+async def movie_catalogue(request: web.Request):
+    """Render a download-only catalogue from the bot's existing indexed files."""
+    query = (request.query.get("q") or "").strip()[:100]
+    criteria = {"file_name": re.compile(re.escape(query), re.IGNORECASE)} if query else {}
+
+    try:
+        total = await Media.count_documents(criteria)
+        cursor = Media.find(criteria)
+        cursor.sort("$natural", -1)
+        cursor.limit(60)
+        records = await cursor.to_list(length=60)
+
+        movies = []
+        for item in records:
+            movies.append({
+                "file_name": item.file_name,
+                "file_size_text": humanbytes(item.file_size),
+                # Poster metadata is added in the next milestone; never display a fake poster.
+                "poster_url": None,
+                # Existing bot /start=file_<id> flow sends the selected file to the visitor.
+                "download_url": f"https://t.me/{temp.U_NAME}?start=file_{item.file_id}",
+            })
+
+        with open("template/home.html", encoding="utf-8") as template_file:
+            template = jinja2.Environment(
+                autoescape=jinja2.select_autoescape(["html", "xml"])
+            ).from_string(template_file.read())
+
+        return web.Response(
+            text=template.render(
+                site_name="KAMINA",
+                query=query,
+                total=total,
+                movies=movies,
+            ),
+            content_type="text/html",
+        )
+    except Exception:
+        logging.exception("Unable to render movie catalogue")
+        raise web.HTTPInternalServerError(
+            text="The movie catalogue is temporarily unavailable."
+        )
 
 
 @routes.get(r"/watch/{path:\S+}", allow_head=True)
