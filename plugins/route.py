@@ -16,6 +16,7 @@ from util.render_template import render_page
 from util.file_properties import get_hash, get_name
 from info import *
 from database.ia_filterdb import Media
+from database.movie_catalogue import catalogue_collection
 from utils import temp
 from util.human_readable import humanbytes
 import jinja2
@@ -28,7 +29,17 @@ routes = web.RouteTableDef()
 async def movie_catalogue(request: web.Request):
     """Render a download-only catalogue from the bot's existing indexed files."""
     query = (request.query.get("q") or "").strip()[:100]
-    criteria = {"file_name": re.compile(re.escape(query), re.IGNORECASE)} if query else {}
+    query_pattern = re.compile(re.escape(query), re.IGNORECASE) if query else None
+    criteria = {}
+    if query_pattern:
+        matching_metadata = await catalogue_collection.find(
+            {"title": query_pattern}, {"file_id": 1}
+        ).to_list(length=500)
+        matching_ids = [entry["file_id"] for entry in matching_metadata]
+        criteria = {"$or": [
+            {"file_name": query_pattern},
+            {"file_id": {"$in": matching_ids}},
+        ]}
 
     try:
         total = await Media.count_documents(criteria)
@@ -37,13 +48,25 @@ async def movie_catalogue(request: web.Request):
         cursor.limit(60)
         records = await cursor.to_list(length=60)
 
+        file_ids = [item.file_id for item in records]
+        metadata_cursor = catalogue_collection.find({"file_id": {"$in": file_ids}})
+        metadata_records = await metadata_cursor.to_list(length=len(file_ids)) if file_ids else []
+        metadata_by_id = {item.get("file_id"): item for item in metadata_records}
+
         movies = []
         for item in records:
+            metadata = metadata_by_id.get(item.file_id, {})
+            display_title = metadata.get("title") or item.file_name
+            if query and query.lower() not in display_title.lower() and query.lower() not in item.file_name.lower():
+                continue
             movies.append({
                 "file_id": item.file_id,
                 "file_name": item.file_name,
+                "title": display_title,
+                "year": metadata.get("year"),
+                "genres": metadata.get("genres") or "",
+                "poster_url": metadata.get("poster_url"),
                 "file_size_text": humanbytes(item.file_size),
-                "poster_url": None,
                 "download_url": f"/download/{quote_plus(item.file_id)}",
             })
 
