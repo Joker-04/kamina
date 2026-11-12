@@ -5,6 +5,7 @@ import logging
 import secrets
 import time
 import mimetypes
+from urllib.parse import quote_plus
 from aiohttp.http_exceptions import BadStatusLine
 from lazybot import multi_clients, work_loads, LazyPrincessBot
 from server.exceptions import FIleNotFound, InvalidHash
@@ -12,6 +13,7 @@ from zzint import StartTime, __version__
 from util.custom_dl import ByteStreamer
 from util.time_format import get_readable_time
 from util.render_template import render_page
+from util.file_properties import get_hash, get_name
 from info import *
 from database.ia_filterdb import Media
 from utils import temp
@@ -38,12 +40,11 @@ async def movie_catalogue(request: web.Request):
         movies = []
         for item in records:
             movies.append({
+                "file_id": item.file_id,
                 "file_name": item.file_name,
                 "file_size_text": humanbytes(item.file_size),
-                # Poster metadata is added in the next milestone; never display a fake poster.
                 "poster_url": None,
-                # Existing bot /start=file_<id> flow sends the selected file to the visitor.
-                "download_url": f"https://t.me/{temp.U_NAME}?start=file_{item.file_id}",
+                "download_url": f"/download/{quote_plus(item.file_id)}",
             })
 
         with open("template/home.html", encoding="utf-8") as template_file:
@@ -67,16 +68,50 @@ async def movie_catalogue(request: web.Request):
         )
 
 
-@routes.get(r"/watch/{path:\S+}", allow_head=True)
+@routes.get(r"/download/{file_id}")
+async def browser_download(request: web.Request):
+    """Create a Telegram-backed download URL and redirect Chrome to the file."""
+    file_id = request.match_info["file_id"]
+    try:
+        record = await Media.find_one({"file_id": file_id})
+        if not record:
+            raise web.HTTPNotFound(text="This file is no longer available.")
+
+        index = min(work_loads, key=work_loads.get)
+        client = multi_clients[index]
+        log_message = await client.send_cached_media(
+            chat_id=LOG_CHANNEL,
+            file_id=record.file_id,
+        )
+
+        filename = get_name(log_message) or record.file_name or "download"
+        file_hash = get_hash(log_message)
+        if not file_hash:
+            raise web.HTTPInternalServerError(text="Could not prepare this download.")
+
+        download_url = (
+            f"{URL}{log_message.id}/{quote_plus(filename)}?hash={file_hash}"
+        )
+        raise web.HTTPFound(location=download_url)
+    except web.HTTPException:
+        raise
+    except Exception:
+        logging.exception("Unable to prepare browser download")
+        raise web.HTTPInternalServerError(
+            text="Unable to prepare this download. Please try again."
+        )
+
+
+@routes.get(r"/watch/{path:\\S+}", allow_head=True)
 async def stream_handler(request: web.Request):
     try:
         path = request.match_info["path"]
-        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
+        match = re.search(r"^([a-zA-Z0-9_-]{6})(\\d+)$", path)
         if match:
             secure_hash = match.group(1)
             id = int(match.group(2))
         else:
-            id = int(re.search(r"(\d+)(?:\/\S+)?", path).group(1))
+            id = int(re.search(r"(\\d+)(?:/\\S+)?", path).group(1))
             secure_hash = request.rel_url.query.get("hash")
         return web.Response(text=await render_page(id, secure_hash), content_type='text/html')
     except InvalidHash as e:
@@ -89,16 +124,16 @@ async def stream_handler(request: web.Request):
         logging.critical(e.with_traceback(None))
         raise web.HTTPInternalServerError(text=str(e))
 
-@routes.get(r"/{path:\S+}", allow_head=True)
+@routes.get(r"/{path:\\S+}", allow_head=True)
 async def stream_handler(request: web.Request):
     try:
         path = request.match_info["path"]
-        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
+        match = re.search(r"^([a-zA-Z0-9_-]{6})(\\d+)$", path)
         if match:
             secure_hash = match.group(1)
             id = int(match.group(2))
         else:
-            id = int(re.search(r"(\d+)(?:\/\S+)?", path).group(1))
+            id = int(re.search(r"(\\d+)(?:/\\S+)?", path).group(1))
             secure_hash = request.rel_url.query.get("hash")
         return await media_streamer(request, id, secure_hash)
     except InvalidHash as e:
@@ -115,10 +150,10 @@ class_cache = {}
 
 async def media_streamer(request: web.Request, id: int, secure_hash: str):
     range_header = request.headers.get("Range", 0)
-    
+
     index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
-    
+
     if MULTI_CLIENT:
         logging.info(f"Client {index} is now serving {request.remote}")
 
@@ -132,11 +167,11 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
     logging.debug("before calling get_file_properties")
     file_id = await tg_connect.get_file_properties(id)
     logging.debug("after calling get_file_properties")
-    
+
     if file_id.unique_id[:6] != secure_hash:
         logging.debug(f"Invalid hash for message with ID {id}")
         raise InvalidHash
-    
+
     file_size = file_id.file_size
 
     if range_header:
@@ -179,7 +214,7 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
                 file_name = f"{secrets.token_hex(2)}.unknown"
     else:
         if file_name:
-            mime_type = mimetypes.guess_type(file_id.file_name)
+            mime_type = mimetypes.guess_type(file_id.file_name)[0] or "application/octet-stream"
         else:
             mime_type = "application/octet-stream"
             file_name = f"{secrets.token_hex(2)}.unknown"
@@ -188,10 +223,10 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
         status=206 if range_header else 200,
         body=body,
         headers={
-            "Content-Type": f"{mime_type}",
+            "Content-Type": mime_type,
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{file_name}"',
+            "Content-Disposition": f'attachment; filename="{file_name}"',
             "Accept-Ranges": "bytes",
         },
     )
