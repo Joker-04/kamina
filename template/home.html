@@ -19,10 +19,10 @@ a{color:inherit;text-decoration:none}.wrap{width:min(1180px,92%);margin:auto}.to
 </style></head>
 <body>
 <header class="top"><div class="wrap nav"><a class="brand" href="/">KAMINA<span>.</span></a><nav class="navlinks"><a class="active" href="/">Home</a><a href="/movies">My Movies</a></nav></div></header>
-<main class="wrap"><section class="hero"><div class="eyebrow">Your movie library</div><h1>Find your next<br><span style="color:#c4b5fd">favourite movie.</span></h1><p>Browse the available catalogue and get your files directly through our Telegram download bot.</p>
+<main class="wrap"><section class="hero"><div class="eyebrow">Your movie library</div><h1>Find your next<br><span style="color:#c4b5fd">favourite movie.</span></h1><p>Browse your library and download available files directly in your browser.</p>
 <form class="search" action="/movies" method="get"><input name="q" value="{{ query }}" placeholder="Search movies by title..." aria-label="Search movies"><button type="submit">Search</button></form></section>
 <section><div class="sectionhead"><h2>{% if query %}Search results{% else %}My Movies{% endif %}</h2><span class="count">{{ total }} files indexed</span></div><div class="grid">
-{% for movie in movies %}<article class="card"><div class="poster">{% if movie.poster_url %}<img src="{{ movie.poster_url }}" alt="{{ movie.file_name }}" loading="lazy">{% else %}<div class="placeholder">K</div>{% endif %}</div><div class="meta"><div class="title">{{ movie.file_name }}</div><div class="size">{{ movie.file_size_text }}</div><a class="download" href="{{ movie.download_url }}" target="_blank" rel="noopener">↓ Get Download</a></div></article>
+{% for movie in movies %}<article class="card"><div class="poster">{% if movie.poster_url %}<img src="{{ movie.poster_url }}" alt="{{ movie.file_name }}" loading="lazy">{% else %}<div class="placeholder">K</div>{% endif %}</div><div class="meta"><div class="title">{{ movie.file_name }}</div><div class="size">{{ movie.file_size_text }}</div><a class="download" href="{{ movie.download_url }}">↓ Get Download</a></div></article>
 {% else %}<div class="empty"><strong>No movies found.</strong><br>Try another title or index files through your Telegram bot.</div>{% endfor %}
 </div></section></main><footer class="footer"><div class="wrap">KAMINA · Download catalogue · Only distribute files you have permission to share.</div></footer>
 </body></html>
