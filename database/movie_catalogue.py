@@ -13,7 +13,7 @@ _background_tasks = set()
 
 
 def clean_movie_title(file_name, caption=None):
-    """Extract a title and year while dropping common release/file tags."""
+    """Extract a searchable title from noisy Telegram release filenames."""
     if caption:
         match = re.search(r"(?im)^\s*/?title\s*:\s*(.+?)\s*$", str(caption))
         if match and match.group(1).strip():
@@ -21,26 +21,40 @@ def clean_movie_title(file_name, caption=None):
 
     title = str(file_name or "Untitled")
     title = re.sub(r"(?i)\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
-    title = re.sub(r"(?i)@\w+", " ", title)
-    title = re.sub(r"(?i)^\s*(2160p|1440p|1080p|720p|480p|360p|4k|8k)[\s._•-]*", "", title)
+    title = re.sub(r"@\w+", " ", title)
+    title = re.sub(r"\[[^\]]*(?:@|movie|movies|channel|clipmate)[^\]]*\]", " ", title, flags=re.I)
+    title = re.sub(r"[_\.•|~]+", " ", title)
+    title = re.sub(r"\s+", " ", title).strip(" -")
+
+    # Remove release labels and episode/season markers that often appear before the real title.
+    title = re.sub(r"(?i)^(?:(?:2160p|1440p|1080p|720p|480p|360p|4k|8k)\s*)+", "", title)
+    title = re.sub(r"(?i)^(?:(?:E\d{1,3}(?:\s*[-–]\s*\d{1,3})?|S\d{1,2}|Season\s*\d+|Complete)\s*)+", "", title)
+    title = re.sub(r"(?i)^(?:sample\s+video|sample)\s+", "", title)
+
+    # Keep the actual title and year, but discard everything after the year.
+    years = list(re.finditer(r"\b(?:19|20)\d{2}\b", title))
+    if years:
+        year_match = years[-1] if len(years) > 1 and title[:years[0].start()].strip().isdigit() else years[0]
+        title = title[:year_match.end()]
+    else:
+        title = re.sub(r"(?i)\b(?:S\d{1,2}(?:E\d{1,3})?|Season\s*\d+)\b.*$", "", title)
+        title = re.sub(
+            r"(?i)\b(hindi|english|tamil|telugu|malayalam|kannada|marathi|"
+            r"bengali|bangla|punjabi|gujarati|urdu|dual audio)\b.*$", "", title
+        )
+
     title = re.sub(
         r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
         r"web[ -]?dl|webrip|hdrip|brrip|dvdrip|hdtv|hdtc|x264|x265|hevc|aac|"
-        r"10bit|5\.1|2\.0|cleaned|proper|repack|combined)\b.*$",
-        "",
-        title,
+        r"10bit|5\.1|2\.0|cleaned|proper|repack|combined|hindi|english|tamil|"
+        r"telugu|malayalam|kannada|marathi|dual audio)\b.*$", "", title
     )
-    year_match = re.search(r"\b(?:19|20)\d{2}\b", title)
-    if year_match:
-        title = title[:year_match.end()]
-    else:
-        title = re.sub(r"(?i)\bS\d{1,2}(?:E\d{1,3})?\b.*$", "", title)
-        title = re.sub(r"(?i)\b(hindi|english|tamil|telugu|malayalam|kannada|"
-                       r"marathi|bengali|bangla|punjabi|gujarati|urdu|dual audio)\b.*$", "", title)
     title = re.sub(r"[\[\](){}]", " ", title)
     title = re.sub(r"[._+\-•|:~]+", " ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title or "Untitled"
+    title = re.sub(r"\s+", " ", title).strip(" -")
+    if not title or re.fullmatch(r"[a-f0-9]{20,}", title, flags=re.I):
+        return "Untitled"
+    return title
 
 
 async def _fetch_and_store_metadata(file_id, title, file_name):
