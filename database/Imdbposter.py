@@ -276,6 +276,88 @@ async def get_movie_details(query, id=False, file=None):
     return details
 
 
+async def _search_anilist(query, year=None):
+    """Search AniList's public GraphQL API without an API key."""
+    graphql = """
+    query ($search: String) {
+      Page(perPage: 10) {
+        media(search: $search, type: ANIME) {
+          id
+          title { romaji english native }
+          startDate { year }
+          coverImage { extraLarge large }
+          description(asHtml: false)
+          genres
+          averageScore
+          siteUrl
+        }
+      }
+    }
+    """
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post("https://graphql.anilist.co", json={"query": graphql, "variables": {"search": query}},) as response:
+            if response.status != 200:
+                return []
+            payload = await response.json()
+    found = []
+    media = ((payload.get("data") or {}).get("Page") or {}).get("media") or []
+    for item in media:
+        names = item.get("title") or {}
+        item_year = (item.get("startDate") or {}).get("year")
+        if year and item_year and str(item_year) != str(year):
+            continue
+        cover = item.get("coverImage") or {}
+        found.append({
+            "title": names.get("english") or names.get("romaji") or names.get("native") or query,
+            "year": item_year,
+            "genres": list_to_str(item.get("genres") or []),
+            "plot": re.sub(r"\s+", " ", item.get("description") or "")[:800],
+            "poster_url": cover.get("extraLarge") or cover.get("large"),
+            "rating": str(item.get("averageScore") or ""),
+            "languages": "",
+            "url": item.get("siteUrl") or "",
+            "kind": "anime",
+            "provider": "anilist",
+            "provider_id": str(item.get("id")),
+            "imdb_id": None,
+        })
+    return found
+
+
+async def _search_jikan(query, year=None):
+    """Search MyAnimeList anime through the public Jikan API."""
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get("https://api.jikan.moe/v4/anime", params={"q": query, "limit": 10, "sfw": "true"}) as response:
+            if response.status != 200:
+                return []
+            payload = await response.json()
+    found = []
+    for item in payload.get("data") or []:
+        item_year = item.get("year")
+        if not item_year:
+            item_year = (((item.get("aired") or {}).get("prop") or {}).get("from") or {}).get("year")
+        if year and item_year and str(item_year) != str(year):
+            continue
+        jpg = ((item.get("images") or {}).get("jpg") or {})
+        found.append({
+            "title": item.get("title_english") or item.get("title") or query,
+            "year": item_year,
+            "genres": list_to_str([g.get("name") for g in item.get("genres") or []]),
+            "plot": item.get("synopsis") or "",
+            "poster_url": jpg.get("large_image_url") or jpg.get("image_url"),
+            "rating": str(item.get("score") or ""),
+            "languages": "",
+            "url": item.get("url") or "",
+            "kind": "anime",
+            "provider": "jikan",
+            "provider_id": str(item.get("mal_id")),
+            "imdb_id": None,
+        })
+    return found
+
+
 async def fetch_image(url, size=(720, 720)):
     if not DEENDAYAL_IMAGE_FETCH:
         logger.info("Image fetching is disabled")
