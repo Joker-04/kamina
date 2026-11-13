@@ -82,13 +82,14 @@ async def choose_poster_candidate(client, query):
         return await query.answer("That candidate is no longer available.", show_alert=True)
 
     candidate = candidates[index]
-    imdb_id = candidate.get("imdb_id")
-    if not imdb_id:
-        return await query.answer("This candidate has no IMDb ID.", show_alert=True)
-
-    details = await get_movie_details(imdb_id, id=True)
-    if not details:
-        return await query.answer("IMDb could not load this candidate. Try again later.", show_alert=True)
+    provider = candidate.get("provider") or "unknown"
+    if candidate.get("imdb_id"):
+        details = await get_movie_details(candidate["imdb_id"], id=True)
+        if not details:
+            details = candidate
+    else:
+        # Non-IMDb candidates already contain the selected provider metadata.
+        details = candidate
 
     source_url = details.get("url") or candidate.get("url") or ""
     poster_url = details.get("poster_url") or candidate.get("poster_url")
@@ -102,7 +103,7 @@ async def choose_poster_candidate(client, query):
         "rating": details.get("rating") or "",
         "languages": details.get("languages") or "",
         "imdb_url": source_url,
-        "metadata_source": "imdb_admin_selected",
+        "metadata_source": provider + "_admin_selected",
         "metadata_status": "ready" if poster_url else "no_poster",
         "poster_review_id": None,
         "poster_candidates": [],

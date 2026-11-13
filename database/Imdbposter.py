@@ -188,7 +188,7 @@ def _search_imdb_sync(query, file=None):
 
 async def _search_tvmaze(query, file=None):
     title, year = _split_title_year(query, file)
-    if not title or _infer_media_type(query, file) != "tv":
+    if not title:
         return None
 
     timeout = aiohttp.ClientTimeout(total=15)
@@ -241,7 +241,7 @@ async def _search_tvmaze(query, file=None):
 
 
 async def get_movie_details(query, id=False, file=None):
-    """Use strict IMDb title/year/type matching, with a no-key TVmaze fallback."""
+    """Search all available providers concurrently; no category is required."""
     if id:
         try:
             return await asyncio.to_thread(_get_imdb_by_id_sync, query)
@@ -249,31 +249,145 @@ async def get_movie_details(query, id=False, file=None):
             logger.exception("IMDb ID lookup failed for %r", query)
             return None
 
-    try:
-        details = await asyncio.to_thread(_search_imdb_sync, query, file)
-        if details:
-            if details.get("needs_review"):
-                logger.info("IMDb match for %r needs admin selection", query)
-            elif details.get("poster_url"):
-                logger.info("IMDb metadata found a verified poster for %r", query)
-                return details
-            else:
-                logger.info("IMDb matched %r without a poster; trying TVmaze if applicable", query)
-        else:
-            logger.info("IMDb found no strict match for %r; trying TVmaze if applicable", query)
-        if details and details.get("needs_review"):
-            return details
-    except Exception:
-        logger.exception("IMDb lookup failed for %r; trying TVmaze if applicable", query)
-        details = None
+    title, year = _split_title_year(query, file)
+    if not title:
+        return None
 
-    try:
-        tvmaze_details = await _search_tvmaze(query, file)
-        if tvmaze_details:
-            return tvmaze_details
-    except Exception:
-        logger.exception("TVmaze lookup failed for %r", query)
-    return details
+    results = await asyncio.gather(
+        asyncio.to_thread(_search_imdb_sync, title, file),
+        _search_tvmaze(title, file),
+        _search_anilist(title, year),
+        _search_jikan(title, year),
+        return_exceptions=True,
+    )
+    candidates = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("Metadata provider failed for %r: %s", title, result)
+            continue
+        if not result:
+            continue
+        if isinstance(result, list):
+            candidates.extend(result)
+        elif result.get("needs_review"):
+            candidates.extend(result.get("candidates") or [])
+        else:
+            candidates.append(result)
+
+    ranked = []
+    for candidate in candidates:
+        score = _title_match_score(title, candidate.get("title"))
+        if score < (0.72 if len(title.split()) > 1 else 0.86):
+            continue
+        candidate_year = str(candidate.get("year") or "")
+        if year and candidate_year and candidate_year != str(year):
+            continue
+        candidate["match_score"] = round(score, 4)
+        candidate.setdefault("provider", "imdb" if candidate.get("imdb_id") else "tvmaze")
+        ranked.append(candidate)
+
+    # Deduplicate identical title/year results across providers.
+    unique = {}
+    for candidate in ranked:
+        key = (_normalise_title(candidate.get("title")), str(candidate.get("year") or ""))
+        previous = unique.get(key)
+        if not previous or (bool(candidate.get("poster_url")), candidate["match_score"]) > (bool(previous.get("poster_url")), previous["match_score"]):
+            unique[key] = candidate
+    ranked = sorted(unique.values(), key=lambda x: (x["match_score"], bool(x.get("poster_url"))), reverse=True)
+
+    if not ranked:
+        logger.info("No provider returned a plausible match for %r", title)
+        return None
+    exact = [x for x in ranked if _normalise_title(x.get("title")) == _normalise_title(title)]
+    if len(exact) == 1 and exact[0]["match_score"] >= 0.98:
+        selected = exact[0]
+        selected.pop("match_score", None)
+        return selected
+
+    # Ambiguous matches require a person to choose; do not guess a poster.
+    return {"needs_review": True, "candidates": ranked[:8], "search_title": title}
+
+
+async def _search_anilist(query, year=None):
+    """Search AniList's public GraphQL API without an API key."""
+    graphql = """
+    query ($search: String) {
+      Page(perPage: 10) {
+        media(search: $search, type: ANIME) {
+          id
+          title { romaji english native }
+          startDate { year }
+          coverImage { extraLarge large }
+          description(asHtml: false)
+          genres
+          averageScore
+          siteUrl
+        }
+      }
+    }
+    """
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post("https://graphql.anilist.co", json={"query": graphql, "variables": {"search": query}},) as response:
+            if response.status != 200:
+                return []
+            payload = await response.json()
+    found = []
+    media = ((payload.get("data") or {}).get("Page") or {}).get("media") or []
+    for item in media:
+        names = item.get("title") or {}
+        item_year = (item.get("startDate") or {}).get("year")
+        if year and item_year and str(item_year) != str(year):
+            continue
+        cover = item.get("coverImage") or {}
+        found.append({
+            "title": names.get("english") or names.get("romaji") or names.get("native") or query,
+            "year": item_year,
+            "genres": list_to_str(item.get("genres") or []),
+            "plot": re.sub(r"\s+", " ", item.get("description") or "")[:800],
+            "poster_url": cover.get("extraLarge") or cover.get("large"),
+            "rating": str(item.get("averageScore") or ""),
+            "languages": "",
+            "url": item.get("siteUrl") or "",
+            "kind": "anime",
+            "provider": "anilist",
+            "provider_id": str(item.get("id")),
+            "imdb_id": None,
+        })
+    return found
+
+
+async def _search_jikan(query, year=None):
+    """Search MyAnimeList anime through the public Jikan API."""
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get("https://api.jikan.moe/v4/anime", params={"q": query, "limit": 10, "sfw": "true"}) as response:
+            if response.status != 200:
+                return []
+            payload = await response.json()
+    found = []
+    for item in payload.get("data") or []:
+        item_year = item.get("year")
+        if not item_year:
+            item_year = (((item.get("aired") or {}).get("prop") or {}).get("from") or {}).get("year")
+        if year and item_year and str(item_year) != str(year):
+            continue
+        jpg = ((item.get("images") or {}).get("jpg") or {})
+        found.append({
+            "title": item.get("title_english") or item.get("title") or query,
+            "year": item_year,
+            "genres": list_to_str([g.get("name") for g in item.get("genres") or []]),
+            "plot": item.get("synopsis") or "",
+            "poster_url": jpg.get("large_image_url") or jpg.get("image_url"),
+            "rating": str(item.get("score") or ""),
+            "languages": "",
+            "url": item.get("url") or "",
+            "kind": "anime",
+            "provider": "jikan",
+            "provider_id": str(item.get("mal_id")),
+            "imdb_id": None,
+        })
+    return found
 
 
 async def fetch_image(url, size=(720, 720)):

@@ -108,16 +108,22 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
         if details.get("needs_review"):
             token = secrets.token_hex(5)
             candidates = []
-            for candidate in details.get("candidates", [])[:5]:
-                if not candidate.get("imdb_id"):
+            for candidate in details.get("candidates", [])[:8]:
+                if not candidate.get("poster_url") and not candidate.get("url"):
                     continue
                 candidates.append({
                     "title": candidate.get("title") or title,
                     "year": candidate.get("year"),
                     "kind": candidate.get("kind") or "movie",
+                    "provider": candidate.get("provider") or ("imdb" if candidate.get("imdb_id") else "unknown"),
+                    "provider_id": candidate.get("provider_id"),
                     "imdb_id": candidate.get("imdb_id"),
                     "poster_url": candidate.get("poster_url"),
                     "url": candidate.get("url"),
+                    "genres": candidate.get("genres") or "",
+                    "plot": candidate.get("plot") or "",
+                    "rating": candidate.get("rating") or "",
+                    "languages": candidate.get("languages") or "",
                 })
             if not candidates:
                 await catalogue_collection.update_one(
@@ -140,7 +146,7 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
 
         poster_url = details.get("poster_url")
         source_url = details.get("url") or ""
-        metadata_source = "tvmaze" if "tvmaze.com" in source_url else "imdb"
+        metadata_source = details.get("provider") or ("tvmaze" if "tvmaze.com" in source_url else "imdb")
         values = {
             "title": details.get("title") or title,
             "year": details.get("year"),
