@@ -86,7 +86,6 @@ async def choose_poster_candidate(client, query):
     if not imdb_id:
         return await query.answer("This candidate has no IMDb ID.", show_alert=True)
 
-    await query.answer("Loading selected movie details...")
     details = await get_movie_details(imdb_id, id=True)
     if not details:
         return await query.answer("IMDb could not load this candidate. Try again later.", show_alert=True)
