@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from difflib import SequenceMatcher
 from io import BytesIO
 
 import aiohttp
@@ -33,6 +34,13 @@ def _split_title_year(query, file=None):
     return text, year
 
 
+def _infer_media_type(query, file=None):
+    source = f"{query or ''} {file or ''}"
+    if re.search(r"(?i)\b(?:S\d{1,2}(?:E\d{1,3})?|Season\s*\d+|Episode\s*\d+)\b", source):
+        return "tv"
+    return "movie"
+
+
 def _normalise_title(value):
     value = str(value or "").lower()
     value = re.sub(r"[^a-z0-9]+", " ", value)
@@ -40,9 +48,6 @@ def _normalise_title(value):
 
 
 def _title_match_score(query, candidate):
-    """Return a conservative similarity score to avoid unrelated poster matches."""
-    from difflib import SequenceMatcher
-
     left = _normalise_title(query)
     right = _normalise_title(candidate)
     if not left or not right:
@@ -54,37 +59,7 @@ def _title_match_score(query, candidate):
     return max(SequenceMatcher(None, left, right).ratio(), overlap)
 
 
-def _get_imdb_details_sync(query, id=False, file=None):
-    if id:
-        movie_id = str(query).removeprefix("tt")
-    else:
-        title, year = _split_title_year(query, file)
-        if not title:
-            return None
-        results = ia.search_movie(title, results=10)
-        if not results:
-            return None
-
-        ranked = []
-        for item in results:
-            candidate_title = item.get("title") or ""
-            score = _title_match_score(title, candidate_title)
-            candidate_year = str(item.get("year") or "")
-            kind = item.get("kind") or ""
-            # For films, a supplied year must agree. TV seasons may carry a later
-            # release year than the series premiere, so title confidence leads there.
-            if year and kind == "movie" and candidate_year and candidate_year != year:
-                continue
-            if score >= (0.62 if len(title.split()) > 1 else 0.80):
-                ranked.append((score, item))
-        if not ranked:
-            logger.info("IMDb candidates rejected as weak title matches for %r", title)
-            return None
-        ranked.sort(key=lambda pair: pair[0], reverse=True)
-        preferred = [pair for pair in ranked if pair[1].get("kind") in ("movie", "tv series", "tv mini series")]
-        movie_id = (preferred or ranked)[0][1].movieID
-
-    movie = ia.get_movie(movie_id)
+def _details_from_movie(movie, movie_id):
     plot = movie.get("plot")
     if plot:
         plot = plot[0]
@@ -124,10 +99,96 @@ def _get_imdb_details_sync(query, id=False, file=None):
     }
 
 
-async def _search_tvmaze(query, file=None):
-    """Search TVmaze for a TV-show match. TVmaze's public API needs no API key."""
+def _get_imdb_by_id_sync(query):
+    movie_id = str(query).removeprefix("tt")
+    movie = ia.get_movie(movie_id)
+    return _details_from_movie(movie, movie_id)
+
+
+def _search_imdb_sync(query, file=None):
     title, year = _split_title_year(query, file)
     if not title:
+        return None
+
+    expected_type = _infer_media_type(query, file)
+    results = ia.search_movie(title, results=30)
+    if not results:
+        return None
+
+    allowed_kinds = (
+        {"tv series", "tv mini series"}
+        if expected_type == "tv"
+        else {"movie", "tv movie", "video movie"}
+    )
+    ranked = []
+    for item in results:
+        candidate_title = item.get("title") or ""
+        score = _title_match_score(title, candidate_title)
+        kind = str(item.get("kind") or "").lower()
+        candidate_year = str(item.get("year") or "")
+        if kind not in allowed_kinds:
+            continue
+        if score < (0.78 if len(title.split()) > 1 else 0.88):
+            continue
+        # A supplied year is a hard filter, not just a small ranking bonus.
+        if year and candidate_year != year:
+            continue
+        ranked.append((score, item))
+
+    if not ranked:
+        logger.info("IMDb found no reliable %s match for %r (%s)", expected_type, title, year or "year unknown")
+        return None
+
+    ranked.sort(
+        key=lambda pair: (
+            pair[0] == 1.0,
+            pair[0],
+            str(pair[1].get("year") or ""),
+        ),
+        reverse=True,
+    )
+
+    # Fetch details for a small shortlist so the admin can compare real posters.
+    candidates = []
+    for _, item in ranked[:6]:
+        try:
+            details = _details_from_movie(ia.get_movie(item.movieID), item.movieID)
+            if details.get("title"):
+                candidates.append(details)
+        except Exception:
+            logger.exception("Could not load IMDb candidate %s", getattr(item, "movieID", "?"))
+
+    if not candidates:
+        return None
+
+    exact = [
+        candidate for candidate in candidates
+        if _normalise_title(candidate.get("title")) == _normalise_title(title)
+    ]
+    if year:
+        exact_year = [candidate for candidate in exact if str(candidate.get("year") or "") == year]
+        if len(exact_year) == 1:
+            return exact_year[0]
+        if len(exact_year) > 1:
+            return {"needs_review": True, "candidates": exact_year, "search_title": title}
+        # Never silently choose a different release year.
+        return None
+
+    if len(exact) == 1:
+        return exact[0]
+
+    # Same-name titles or fuzzy-only results require an admin to choose.
+    review_candidates = exact if len(exact) > 1 else candidates
+    return {
+        "needs_review": True,
+        "candidates": review_candidates[:5],
+        "search_title": title,
+    }
+
+
+async def _search_tvmaze(query, file=None):
+    title, year = _split_title_year(query, file)
+    if not title or _infer_media_type(query, file) != "tv":
         return None
 
     timeout = aiohttp.ClientTimeout(total=15)
@@ -138,34 +199,30 @@ async def _search_tvmaze(query, file=None):
                 return None
             results = await response.json()
 
-    if not results:
-        return None
-
     shows = [entry.get("show", {}) for entry in results if entry.get("show")]
-    if not shows:
-        return None
-
     ranked = []
-    for candidate in shows:
-        score = _title_match_score(title, candidate.get("name") or "")
-        premiered_year = str(candidate.get("premiered") or "")[:4]
-        if year and premiered_year == year:
-            score = min(1.0, score + 0.10)
-        if score >= (0.62 if len(title.split()) > 1 else 0.80):
-            ranked.append((score, candidate))
-    if not ranked:
-        logger.info("TVmaze candidates rejected as weak title matches for %r", title)
+    for show in shows:
+        score = _title_match_score(title, show.get("name") or "")
+        premiered_year = str(show.get("premiered") or "")[:4]
+        if score < 0.90 or _normalise_title(show.get("name")) != _normalise_title(title):
+            continue
+        if year and premiered_year != year:
+            continue
+        ranked.append(show)
+
+    # TVmaze is only used automatically when the title/year identifies one show.
+    if len(ranked) != 1:
+        if ranked:
+            logger.info("TVmaze has multiple possible exact matches for %r; not auto-selecting", title)
         return None
 
-    ranked.sort(key=lambda pair: pair[0], reverse=True)
-    show = ranked[0][1]
+    show = ranked[0]
     image = show.get("image") or {}
     poster_url = image.get("original") or image.get("medium")
     premiered = show.get("premiered") or ""
     summary = re.sub(r"<[^>]+>", " ", show.get("summary") or "")
     summary = re.sub(r"\s+", " ", summary).strip()
     rating = (show.get("rating") or {}).get("average")
-
     return {
         "title": show.get("name") or title,
         "year": int(premiered[:4]) if len(premiered) >= 4 and premiered[:4].isdigit() else None,
@@ -184,33 +241,37 @@ async def _search_tvmaze(query, file=None):
 
 
 async def get_movie_details(query, id=False, file=None):
-    """Find metadata with IMDb first, then use TVmaze as a no-key TV-series fallback."""
-    if not id:
+    """Use strict IMDb title/year/type matching, with a no-key TVmaze fallback."""
+    if id:
         try:
-            details = await asyncio.to_thread(_get_imdb_details_sync, query, False, file)
-            if details and details.get("poster_url"):
-                logger.info("IMDb metadata found a poster for %r", query)
-                return details
-            if details:
-                logger.info("IMDb matched %r but returned no poster; trying TVmaze", query)
-            else:
-                logger.info("IMDb found no match for %r; trying TVmaze", query)
+            return await asyncio.to_thread(_get_imdb_by_id_sync, query)
         except Exception:
-            logger.exception("IMDb lookup failed for %r; trying TVmaze", query)
-
-        try:
-            details = await _search_tvmaze(query, file)
-            if details:
-                logger.info("TVmaze metadata found for %r (poster_found=%s)", query, bool(details.get("poster_url")))
-                return details
-        except Exception:
-            logger.exception("TVmaze lookup failed for %r", query)
-        return None
+            logger.exception("IMDb ID lookup failed for %r", query)
+            return None
 
     try:
-        return await asyncio.to_thread(_get_imdb_details_sync, query, True, file)
+        details = await asyncio.to_thread(_search_imdb_sync, query, file)
+        if details:
+            if details.get("needs_review"):
+                logger.info("IMDb match for %r needs admin selection", query)
+            elif details.get("poster_url"):
+                logger.info("IMDb metadata found a verified poster for %r", query)
+                return details
+            else:
+                logger.info("IMDb matched %r without a poster; trying TVmaze if applicable", query)
+                if details.get("title"):
+                    return details
+        else:
+            logger.info("IMDb found no strict match for %r; trying TVmaze if applicable", query)
+        if details and details.get("needs_review"):
+            return details
     except Exception:
-        logger.exception("IMDb ID lookup failed for %r", query)
+        logger.exception("IMDb lookup failed for %r; trying TVmaze if applicable", query)
+
+    try:
+        return await _search_tvmaze(query, file)
+    except Exception:
+        logger.exception("TVmaze lookup failed for %r", query)
         return None
 
 
