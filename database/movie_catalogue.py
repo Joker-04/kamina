@@ -59,13 +59,13 @@ def clean_movie_title(file_name, caption=None):
 def extract_catalogue_info(file_name, title=None):
     """Identify a TV episode, movie quality, and a stable grouping key from a release filename."""
     raw = str(file_name or "")
-    episode = re.search(r"(?i)\\bS(\\d{1,2})\\s*E(\\d{1,3})\\b|\\bSeason\\s*(\\d{1,2})\\s*[- ]?Episode\\s*(\\d{1,3})\\b|\\b(\\d{1,2})x(\\d{1,3})\\b", raw)
+    episode = re.search(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b|\bSeason\s*(\d{1,2})\s*[- ]?Episode\s*(\d{1,3})\b|\b(\d{1,2})x(\d{1,3})\b", raw)
     if episode:
         groups = episode.groups()
         season = int(groups[0] or groups[2] or groups[4])
         number = int(groups[1] or groups[3] or groups[5])
-        group_title = re.sub(r"(?i)[._]+", " ", raw[:episode.start()]).strip(" -_.[]()")
-        group_title = re.sub(r"(?i)\\b(complete|season|series)\\b.*$", "", group_title).strip(" -_.")
+        group_title = (title or re.sub(r"(?i)[._]+", " ", raw[:episode.start()])).strip(" -_.[]()")
+        group_title = re.sub(r"(?i)\b(complete|season|series)\b.*$", "", group_title).strip(" -_.")
         group_title = group_title or title or "Untitled Series"
         kind = "series"
         quality = None
@@ -73,9 +73,9 @@ def extract_catalogue_info(file_name, title=None):
         season = number = None
         kind = "movie"
         group_title = clean_movie_title(raw) or title or "Untitled"
-        quality_match = re.search(r"(?i)\\b(2160p|1440p|1080p|720p|480p|360p|4k|8k)\\b", raw)
+        quality_match = re.search(r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k)\b", raw)
         quality = quality_match.group(1).upper() if quality_match else "File"
-    year_match = re.search(r"\\b(?:19|20)\\d{2}\\b", raw)
+    year_match = re.search(r"\b(?:19|20)\d{2}\b", raw)
     year = year_match.group(0) if year_match else None
     normalized = re.sub(r"[^a-z0-9]+", " ", group_title.lower()).strip()
     identity = f"{kind}|{normalized}|{year or ''}"
