@@ -29,7 +29,11 @@ def _catalogue_card(group_key, entries):
     poster = next((x.get("poster_url") for x in entries if x.get("poster_url")), None)
     return {"group_key": group_key, "title": first.get("group_title") or first.get("title") or first.get("file_name") or "Untitled",
             "year": first.get("catalogue_year") or first.get("year"), "poster_url": poster,
-            "kind": first.get("catalogue_type") or "movie", "count": len(entries), "url": f"/title/{group_key}"}
+            "kind": first.get("catalogue_type") or "movie", "count": len(entries),
+            "search_count": sum(int(x.get("search_count", 0) or 0) for x in entries),
+            "view_count": sum(int(x.get("view_count", 0) or 0) for x in entries),
+            "activity_score": sum(int(x.get("search_count", 0) or 0) * 2 + int(x.get("view_count", 0) or 0) for x in entries),
+            "url": f"/title/{group_key}"}
 
 
 @routes.get("/", allow_head=True)
@@ -52,13 +56,28 @@ async def movie_catalogue(request: web.Request):
             key = meta.get("catalogue_group_key") or ("file-" + item.file_id)
             groups.setdefault(key, []).append(info)
         cards = [_catalogue_card(key, values) for key, values in groups.items()]
+        # Count searches against matching grouped titles. Counts start after this feature is deployed.
         if query:
-            cards = [c for c in cards if query.casefold() in c["title"].casefold()]
-        cards.sort(key=lambda c: c["title"].casefold())
+            matched_keys = {c["group_key"] for c in cards if query.casefold() in c["title"].casefold()}
+            for key in matched_keys:
+                file_ids = [x["file_id"] for x in groups.get(key, []) if x.get("file_id")]
+                if file_ids:
+                    await catalogue_collection.update_many({"file_id": {"$in": file_ids}}, {"$inc": {"search_count": 1}})
+            cards = [c for c in cards if c["group_key"] in matched_keys]
+            for c in cards:
+                c["search_count"] += 1
+                c["activity_score"] += 2
         total = len(cards)
+        # Media records are fetched newest-first, so retain that order for Latest Uploads.
+        latest_cards = cards[:]
+        most_searched = sorted(cards, key=lambda c: (c["search_count"], c["title"].casefold()), reverse=True)[:12]
+        most_viewed = sorted(cards, key=lambda c: (c["view_count"], c["title"].casefold()), reverse=True)[:12]
+        trending = sorted(cards, key=lambda c: (c["activity_score"], c["title"].casefold()), reverse=True)[:12]
         with open("template/home.html", encoding="utf-8") as f:
             template = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"])).from_string(f.read())
-        return web.Response(text=template.render(site_name="KAMINA", query=query, total=total, movies=cards[:120]), content_type="text/html")
+        return web.Response(text=template.render(site_name="KAMINA", query=query, total=total, movies=cards[:120],
+                            latest_uploads=latest_cards[:12], most_searched=most_searched,
+                            most_viewed=most_viewed, trending=trending), content_type="text/html")
     except Exception:
         logging.exception("Unable to render grouped catalogue")
         raise web.HTTPInternalServerError(text="The movie catalogue is temporarily unavailable.")
@@ -71,6 +90,11 @@ async def catalogue_title_page(request: web.Request):
         metadata = await catalogue_collection.find({"catalogue_group_key": group_key}).to_list(length=500)
         if not metadata:
             raise web.HTTPNotFound(text="This title is not available.")
+        # Count a visit to this movie/series detail page.
+        await catalogue_collection.update_many(
+            {"file_id": {"$in": [m.get("file_id") for m in metadata if m.get("file_id")]}},
+            {"$inc": {"view_count": 1}},
+        )
         ids = [m.get("file_id") for m in metadata if m.get("file_id")]
         records = await Media.find({"file_id": {"$in": ids}}).to_list(length=len(ids))
         record_by_id = {x.file_id: x for x in records}
