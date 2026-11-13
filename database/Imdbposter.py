@@ -188,7 +188,7 @@ def _search_imdb_sync(query, file=None):
 
 async def _search_tvmaze(query, file=None):
     title, year = _split_title_year(query, file)
-    if not title or _infer_media_type(query, file) != "tv":
+    if not title:
         return None
 
     timeout = aiohttp.ClientTimeout(total=15)
