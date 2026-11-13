@@ -259,20 +259,21 @@ async def get_movie_details(query, id=False, file=None):
                 return details
             else:
                 logger.info("IMDb matched %r without a poster; trying TVmaze if applicable", query)
-                if details.get("title"):
-                    return details
         else:
             logger.info("IMDb found no strict match for %r; trying TVmaze if applicable", query)
         if details and details.get("needs_review"):
             return details
     except Exception:
         logger.exception("IMDb lookup failed for %r; trying TVmaze if applicable", query)
+        details = None
 
     try:
-        return await _search_tvmaze(query, file)
+        tvmaze_details = await _search_tvmaze(query, file)
+        if tvmaze_details:
+            return tvmaze_details
     except Exception:
         logger.exception("TVmaze lookup failed for %r", query)
-        return None
+    return details
 
 
 async def fetch_image(url, size=(720, 720)):
