@@ -44,7 +44,7 @@ async def poster_review_queue(client, message):
                     callback_data=f"posterpick:{token}:{index}",
                 )
             ]])
-            caption = f"{label}\nSelect this result if the poster and year are correct."
+            caption = f"{html.escape(label)}\nSelect this result if the poster and year are correct."
             try:
                 if candidate.get("poster_url"):
                     await message.reply_photo(
