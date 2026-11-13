@@ -5,7 +5,8 @@ from pyrogram.errors import FloodWait
 from pyrogram.errors.exceptions.bad_request_400 import ChannelInvalid, ChatAdminRequired, UsernameInvalid, UsernameNotModified
 from info import ADMINS
 from info import INDEX_REQ_CHANNEL as LOG_CHANNEL
-from database.ia_filterdb import save_file
+from database.ia_filterdb import save_file, unpack_new_file_id
+from database.movie_catalogue import publish_movie
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from utils import temp
 import re
@@ -174,6 +175,11 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot):
                 aynav, vnay = await save_file(bot, media)
                 if aynav:
                     total_files += 1
+                    # Keep manual indexing in sync with channel uploads:
+                    # publish newly saved files to the website catalogue and fetch metadata/posters.
+                    file_id, _ = unpack_new_file_id(media.file_id)
+                    caption = getattr(message.caption, "html", message.caption) if message.caption else None
+                    await publish_movie(file_id, media.file_name, media.file_size, caption)
                 elif vnay == 0:
                     duplicate += 1
                 elif vnay == 2:
