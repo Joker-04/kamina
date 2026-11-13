@@ -56,6 +56,41 @@ def clean_movie_title(file_name, caption=None):
     return title
 
 
+def extract_catalogue_info(file_name, title=None):
+    """Identify a TV episode, movie quality, and a stable grouping key from a release filename."""
+    raw = str(file_name or "")
+    episode = re.search(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b|\bSeason\s*(\d{1,2})\s*[- ]?Episode\s*(\d{1,3})\b|\b(\d{1,2})x(\d{1,3})\b", raw)
+    if episode:
+        groups = episode.groups()
+        season = int(groups[0] or groups[2] or groups[4])
+        number = int(groups[1] or groups[3] or groups[5])
+        group_title = (title or re.sub(r"(?i)[._]+", " ", raw[:episode.start()])).strip(" -_.[]()")
+        group_title = re.sub(r"(?i)\b(complete|season|series)\b.*$", "", group_title).strip(" -_.")
+        group_title = group_title or title or "Untitled Series"
+        kind = "series"
+        quality = None
+    else:
+        season = number = None
+        kind = "movie"
+        group_title = clean_movie_title(raw) or title or "Untitled"
+        quality_match = re.search(r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k)\b", raw)
+        quality = quality_match.group(1).upper() if quality_match else "File"
+    year_match = re.search(r"\b(?:19|20)\d{2}\b", raw)
+    year = year_match.group(0) if year_match else None
+    normalized = re.sub(r"[^a-z0-9]+", " ", group_title.lower()).strip()
+    identity = f"{kind}|{normalized}|{year or ''}"
+    group_key = __import__("hashlib").sha1(identity.encode("utf-8")).hexdigest()[:16]
+    return {
+        "catalogue_type": kind,
+        "catalogue_group_key": group_key,
+        "group_title": group_title,
+        "catalogue_year": year,
+        "season_number": season,
+        "episode_number": number,
+        "quality_label": quality,
+    }
+
+
 async def _fetch_and_store_metadata(file_id, title, file_name):
     try:
         logger.info("Starting strict IMDb/TVmaze metadata lookup: title=%r file_name=%r", title, file_name)
@@ -138,6 +173,9 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
 async def publish_movie(file_id, file_name, file_size, caption=None):
     """Publish a newly indexed Telegram file to KAMINA's website catalogue."""
     title = clean_movie_title(file_name, caption)
+    grouping = extract_catalogue_info(file_name, title)
+    if grouping["catalogue_type"] == "series":
+        title = grouping["group_title"]
     now = datetime.now(timezone.utc)
     await catalogue_collection.update_one(
         {"file_id": file_id},
@@ -147,6 +185,7 @@ async def publish_movie(file_id, file_name, file_size, caption=None):
                 "file_name": file_name or "download",
                 "file_size": int(file_size or 0),
                 "title": title,
+                **grouping,
                 "poster_url": None,
                 "created_at": now,
                 "download_path": "/download/" + file_id,
