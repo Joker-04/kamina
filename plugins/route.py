@@ -24,71 +24,82 @@ import jinja2
 
 routes = web.RouteTableDef()
 
+def _catalogue_card(group_key, entries):
+    first = entries[0]
+    poster = next((x.get("poster_url") for x in entries if x.get("poster_url")), None)
+    return {"group_key": group_key, "title": first.get("group_title") or first.get("title") or first.get("file_name") or "Untitled",
+            "year": first.get("catalogue_year") or first.get("year"), "poster_url": poster,
+            "kind": first.get("catalogue_type") or "movie", "count": len(entries), "url": f"/title/{group_key}"}
+
+
 @routes.get("/", allow_head=True)
 @routes.get("/movies", allow_head=True)
 async def movie_catalogue(request: web.Request):
-    """Render a download-only catalogue from the bot's existing indexed files."""
+    """Show one catalogue card per movie or series grouping."""
     query = (request.query.get("q") or "").strip()[:100]
-    query_pattern = re.compile(re.escape(query), re.IGNORECASE) if query else None
-    criteria = {}
-    if query_pattern:
-        matching_metadata = await catalogue_collection.find(
-            {"title": query_pattern}, {"file_id": 1}
-        ).to_list(length=500)
-        matching_ids = [entry["file_id"] for entry in matching_metadata]
-        criteria = {"$or": [
-            {"file_name": query_pattern},
-            {"file_id": {"$in": matching_ids}},
-        ]}
-
     try:
-        total = await Media.count_documents(criteria)
-        cursor = Media.find(criteria)
+        cursor = Media.find({})
         cursor.sort("$natural", -1)
-        cursor.limit(60)
-        records = await cursor.to_list(length=60)
-
-        file_ids = [item.file_id for item in records]
-        metadata_cursor = catalogue_collection.find({"file_id": {"$in": file_ids}})
-        metadata_records = await metadata_cursor.to_list(length=len(file_ids)) if file_ids else []
-        metadata_by_id = {item.get("file_id"): item for item in metadata_records}
-
-        movies = []
+        cursor.limit(3000)
+        records = await cursor.to_list(length=3000)
+        ids = [item.file_id for item in records]
+        metas = await catalogue_collection.find({"file_id": {"$in": ids}}).to_list(length=len(ids)) if ids else []
+        meta_by_id = {m.get("file_id"): m for m in metas}
+        groups = {}
         for item in records:
-            metadata = metadata_by_id.get(item.file_id, {})
-            display_title = metadata.get("title") or item.file_name
-            if query and query.lower() not in display_title.lower() and query.lower() not in item.file_name.lower():
-                continue
-            movies.append({
-                "file_id": item.file_id,
-                "file_name": item.file_name,
-                "title": display_title,
-                "year": metadata.get("year"),
-                "genres": metadata.get("genres") or "",
-                "poster_url": metadata.get("poster_url"),
-                "file_size_text": humanbytes(item.file_size),
-                "download_url": f"/download/{quote_plus(item.file_id)}",
-            })
-
-        with open("template/home.html", encoding="utf-8") as template_file:
-            template = jinja2.Environment(
-                autoescape=jinja2.select_autoescape(["html", "xml"])
-            ).from_string(template_file.read())
-
-        return web.Response(
-            text=template.render(
-                site_name="KAMINA",
-                query=query,
-                total=total,
-                movies=movies,
-            ),
-            content_type="text/html",
-        )
+            meta = meta_by_id.get(item.file_id, {})
+            info = {**meta, "file_id": item.file_id, "file_name": item.file_name, "file_size": item.file_size}
+            key = meta.get("catalogue_group_key") or ("file-" + item.file_id)
+            groups.setdefault(key, []).append(info)
+        cards = [_catalogue_card(key, values) for key, values in groups.items()]
+        if query:
+            cards = [c for c in cards if query.casefold() in c["title"].casefold()]
+        cards.sort(key=lambda c: c["title"].casefold())
+        total = len(cards)
+        with open("template/home.html", encoding="utf-8") as f:
+            template = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"])).from_string(f.read())
+        return web.Response(text=template.render(site_name="KAMINA", query=query, total=total, movies=cards[:120]), content_type="text/html")
     except Exception:
-        logging.exception("Unable to render movie catalogue")
-        raise web.HTTPInternalServerError(
-            text="The movie catalogue is temporarily unavailable."
-        )
+        logging.exception("Unable to render grouped catalogue")
+        raise web.HTTPInternalServerError(text="The movie catalogue is temporarily unavailable.")
+
+
+@routes.get("/title/{group_key}", allow_head=True)
+async def catalogue_title_page(request: web.Request):
+    group_key = request.match_info["group_key"]
+    try:
+        metadata = await catalogue_collection.find({"catalogue_group_key": group_key}).to_list(length=500)
+        if not metadata:
+            raise web.HTTPNotFound(text="This title is not available.")
+        ids = [m.get("file_id") for m in metadata if m.get("file_id")]
+        records = await Media.find({"file_id": {"$in": ids}}).to_list(length=len(ids))
+        record_by_id = {x.file_id: x for x in records}
+        entries = []
+        for m in metadata:
+            record = record_by_id.get(m.get("file_id"))
+            if record:
+                entries.append({**m, "file_name": record.file_name, "file_size_text": humanbytes(record.file_size),
+                                "download_url": f"/download/{quote_plus(record.file_id)}"})
+        if not entries:
+            raise web.HTTPNotFound(text="No downloadable files are available for this title.")
+        card = _catalogue_card(group_key, entries)
+        seasons = {}
+        if card["kind"] == "series":
+            for item in entries:
+                seasons.setdefault(item.get("season_number") or 1, []).append(item)
+            for season in seasons:
+                seasons[season].sort(key=lambda x: x.get("episode_number") or 0)
+        entries.sort(key=lambda x: (x.get("quality_label") or "ZZZ", x.get("file_name") or ""))
+        with open("template/title.html", encoding="utf-8") as f:
+            template = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"])).from_string(f.read())
+        return web.Response(text=template.render(title=card["title"], year=card["year"], poster_url=card["poster_url"],
+                            is_series=card["kind"] == "series", seasons=sorted(seasons.items()), files=entries),
+                            content_type="text/html")
+    except web.HTTPException:
+        raise
+    except Exception:
+        logging.exception("Unable to render title page %s", group_key)
+        raise web.HTTPInternalServerError(text="Unable to open this title right now.")
 
 
 @routes.get(r"/download/{file_id}")
