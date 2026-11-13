@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import secrets
 from datetime import datetime, timezone
 
 from database.ia_filterdb import db
@@ -15,43 +16,41 @@ _background_tasks = set()
 def clean_movie_title(file_name, caption=None):
     """Extract a searchable title from noisy Telegram release filenames."""
     if caption:
-        match = re.search(r"(?im)^\s*/?title\s*:\s*(.+?)\s*$", str(caption))
+        match = re.search(r"(?im)^\\s*/?title\\s*:\\s*(.+?)\\s*$", str(caption))
         if match and match.group(1).strip():
             return match.group(1).strip()
 
     title = str(file_name or "Untitled")
-    title = re.sub(r"(?i)\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
-    title = re.sub(r"@\w+", " ", title)
-    title = re.sub(r"\[[^\]]*(?:@|movie|movies|channel|clipmate)[^\]]*\]", " ", title, flags=re.I)
-    title = re.sub(r"[_\.•|~]+", " ", title)
-    title = re.sub(r"\s+", " ", title).strip(" -")
+    title = re.sub(r"(?i)\\.(mkv|mp4|avi|mov|m4v|webm|mpeg|mpg|wmv)$", "", title)
+    title = re.sub(r"@\\w+", " ", title)
+    title = re.sub(r"\\[[^\\]]*(?:@|movie|movies|channel|clipmate)[^\\]]*\\]", " ", title, flags=re.I)
+    title = re.sub(r"[_\\.•|~]+", " ", title)
+    title = re.sub(r"\\s+", " ", title).strip(" -")
 
-    # Remove release labels and episode/season markers that often appear before the real title.
-    title = re.sub(r"(?i)^(?:(?:2160p|1440p|1080p|720p|480p|360p|4k|8k)\s*)+", "", title)
-    title = re.sub(r"(?i)^(?:(?:E\d{1,3}(?:\s*[-–]\s*\d{1,3})?|S\d{1,2}|Season\s*\d+|Complete)\s*)+", "", title)
-    title = re.sub(r"(?i)^(?:sample\s+video|sample)\s+", "", title)
+    title = re.sub(r"(?i)^(?:(?:2160p|1440p|1080p|720p|480p|360p|4k|8k)\\s*)+", "", title)
+    title = re.sub(r"(?i)^(?:(?:E\\d{1,3}(?:\\s*[-–]\\s*\\d{1,3})?|S\\d{1,2}|Season\\s*\\d+|Complete)\\s*)+", "", title)
+    title = re.sub(r"(?i)^(?:sample\\s+video|sample)\\s+", "", title)
 
-    # Keep the actual title and year, but discard everything after the year.
-    years = list(re.finditer(r"\b(?:19|20)\d{2}\b", title))
+    years = list(re.finditer(r"\\b(?:19|20)\\d{2}\\b", title))
     if years:
         year_match = years[-1] if len(years) > 1 and title[:years[0].start()].strip().isdigit() else years[0]
         title = title[:year_match.end()]
     else:
-        title = re.sub(r"(?i)\b(?:S\d{1,2}(?:E\d{1,3})?|Season\s*\d+)\b.*$", "", title)
+        title = re.sub(r"(?i)\\b(?:S\\d{1,2}(?:E\\d{1,3})?|Season\\s*\\d+)\\b.*$", "", title)
         title = re.sub(
-            r"(?i)\b(hindi|english|tamil|telugu|malayalam|kannada|marathi|"
-            r"bengali|bangla|punjabi|gujarati|urdu|dual audio)\b.*$", "", title
+            r"(?i)\\b(hindi|english|tamil|telugu|malayalam|kannada|marathi|"
+            r"bengali|bangla|punjabi|gujarati|urdu|dual audio)\\b.*$", "", title
         )
 
     title = re.sub(
-        r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
+        r"(?i)\\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu[ -]?ray|"
         r"web[ -]?dl|webrip|hdrip|brrip|dvdrip|hdtv|hdtc|x264|x265|hevc|aac|"
-        r"10bit|5\.1|2\.0|cleaned|proper|repack|combined|hindi|english|tamil|"
-        r"telugu|malayalam|kannada|marathi|dual audio)\b.*$", "", title
+        r"10bit|5\\.1|2\\.0|cleaned|proper|repack|combined|hindi|english|tamil|"
+        r"telugu|malayalam|kannada|marathi|dual audio)\\b.*$", "", title
     )
-    title = re.sub(r"[\[\](){}]", " ", title)
-    title = re.sub(r"[._+\-•|:~]+", " ", title)
-    title = re.sub(r"\s+", " ", title).strip(" -")
+    title = re.sub(r"[\\[\\](){}]", " ", title)
+    title = re.sub(r"[._+\\-•|:~]+", " ", title)
+    title = re.sub(r"\\s+", " ", title).strip(" -")
     if not title or re.fullmatch(r"[a-f0-9]{20,}", title, flags=re.I):
         return "Untitled"
     return title
@@ -59,16 +58,49 @@ def clean_movie_title(file_name, caption=None):
 
 async def _fetch_and_store_metadata(file_id, title, file_name):
     try:
-        logger.info("Starting IMDb/TVmaze metadata lookup: title=%r file_name=%r", title, file_name)
+        logger.info("Starting strict IMDb/TVmaze metadata lookup: title=%r file_name=%r", title, file_name)
         async with _metadata_lock:
             details = await get_movie_details(title, False, file_name)
 
         if not details:
-            logger.warning("IMDb and TVmaze returned no match for new upload: title=%r", title)
+            logger.warning("No safe IMDb/TVmaze match for new upload: title=%r", title)
             await catalogue_collection.update_one(
                 {"file_id": file_id},
-                {"$set": {"metadata_status": "no_match"}},
+                {"$set": {"metadata_status": "no_match", "poster_url": None}},
             )
+            return
+
+        if details.get("needs_review"):
+            token = secrets.token_hex(5)
+            candidates = []
+            for candidate in details.get("candidates", [])[:5]:
+                if not candidate.get("imdb_id"):
+                    continue
+                candidates.append({
+                    "title": candidate.get("title") or title,
+                    "year": candidate.get("year"),
+                    "kind": candidate.get("kind") or "movie",
+                    "imdb_id": candidate.get("imdb_id"),
+                    "poster_url": candidate.get("poster_url"),
+                    "url": candidate.get("url"),
+                })
+            if not candidates:
+                await catalogue_collection.update_one(
+                    {"file_id": file_id},
+                    {"$set": {"metadata_status": "no_match", "poster_url": None}},
+                )
+                return
+            await catalogue_collection.update_one(
+                {"file_id": file_id},
+                {"$set": {
+                    "metadata_status": "needs_review",
+                    "poster_url": None,
+                    "poster_review_id": token,
+                    "poster_candidates": candidates,
+                    "poster_search_title": details.get("search_title") or title,
+                }},
+            )
+            logger.info("Poster selection required: title=%r review_id=%s candidates=%s", title, token, len(candidates))
             return
 
         poster_url = details.get("poster_url")
@@ -87,6 +119,8 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
             "metadata_updated_at": datetime.now(timezone.utc),
             "metadata_status": "ready" if poster_url else "no_poster",
             "metadata_source": metadata_source,
+            "poster_review_id": None,
+            "poster_candidates": [],
         }
         await catalogue_collection.update_one(
             {"file_id": file_id},
@@ -95,10 +129,7 @@ async def _fetch_and_store_metadata(file_id, title, file_name):
         )
         logger.info(
             "Website metadata saved: title=%r source=%s status=%s poster_found=%s",
-            title,
-            values["metadata_source"],
-            values["metadata_status"],
-            bool(poster_url),
+            title, values["metadata_source"], values["metadata_status"], bool(poster_url),
         )
     except Exception:
         logger.exception("Could not fetch/store movie metadata for %s", title)
@@ -119,8 +150,10 @@ async def publish_movie(file_id, file_name, file_size, caption=None):
                 "poster_url": None,
                 "created_at": now,
                 "download_path": "/download/" + file_id,
+                "metadata_status": "pending",
+                "poster_review_id": None,
+                "poster_candidates": [],
             },
-            "$setOnInsert": {"metadata_status": "pending"},
         },
         upsert=True,
     )
