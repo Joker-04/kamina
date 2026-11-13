@@ -28,8 +28,30 @@ def _split_title_year(query, file=None):
     if not year and file:
         match = re.search(r"\b((?:19|20)\d{2})\b", str(file))
         year = match.group(1) if match else None
+    text = re.sub(r"(?i)\b(?:S\d{1,2}(?:E\d{1,3})?|Season\s*\d+)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" ._-")
     return text, year
+
+
+def _normalise_title(value):
+    value = str(value or "").lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _title_match_score(query, candidate):
+    """Return a conservative similarity score to avoid unrelated poster matches."""
+    from difflib import SequenceMatcher
+
+    left = _normalise_title(query)
+    right = _normalise_title(candidate)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    left_words, right_words = set(left.split()), set(right.split())
+    overlap = len(left_words & right_words) / max(1, len(left_words))
+    return max(SequenceMatcher(None, left, right).ratio(), overlap)
 
 
 def _get_imdb_details_sync(query, id=False, file=None):
@@ -42,12 +64,25 @@ def _get_imdb_details_sync(query, id=False, file=None):
         results = ia.search_movie(title, results=10)
         if not results:
             return None
-        if year:
-            matching = [item for item in results if str(item.get("year", "")) == year]
-            if matching:
-                results = matching
-        preferred = [item for item in results if item.get("kind") in ("movie", "tv series", "tv mini series", "tv series episode")]
-        movie_id = (preferred or results)[0].movieID
+
+        ranked = []
+        for item in results:
+            candidate_title = item.get("title") or ""
+            score = _title_match_score(title, candidate_title)
+            candidate_year = str(item.get("year") or "")
+            kind = item.get("kind") or ""
+            # For films, a supplied year must agree. TV seasons may carry a later
+            # release year than the series premiere, so title confidence leads there.
+            if year and kind == "movie" and candidate_year and candidate_year != year:
+                continue
+            if score >= (0.62 if len(title.split()) > 1 else 0.80):
+                ranked.append((score, item))
+        if not ranked:
+            logger.info("IMDb candidates rejected as weak title matches for %r", title)
+            return None
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        preferred = [pair for pair in ranked if pair[1].get("kind") in ("movie", "tv series", "tv mini series")]
+        movie_id = (preferred or ranked)[0][1].movieID
 
     movie = ia.get_movie(movie_id)
     plot = movie.get("plot")
@@ -110,16 +145,20 @@ async def _search_tvmaze(query, file=None):
     if not shows:
         return None
 
-    if year:
-        exact_year = [
-            show for show in shows
-            if str(show.get("premiered") or "").startswith(year)
-        ]
-        if exact_year:
-            shows = exact_year
+    ranked = []
+    for candidate in shows:
+        score = _title_match_score(title, candidate.get("name") or "")
+        premiered_year = str(candidate.get("premiered") or "")[:4]
+        if year and premiered_year == year:
+            score = min(1.0, score + 0.10)
+        if score >= (0.62 if len(title.split()) > 1 else 0.80):
+            ranked.append((score, candidate))
+    if not ranked:
+        logger.info("TVmaze candidates rejected as weak title matches for %r", title)
+        return None
 
-    # Prefer a result with a poster; TVmaze search results are relevance-ranked.
-    show = next((item for item in shows if (item.get("image") or {}).get("original") or (item.get("image") or {}).get("medium")), shows[0])
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    show = ranked[0][1]
     image = show.get("image") or {}
     poster_url = image.get("original") or image.get("medium")
     premiered = show.get("premiered") or ""
