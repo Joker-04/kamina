@@ -115,25 +115,42 @@ def _search_imdb_sync(query, file=None):
     if not results:
         return None
 
+    # Cinemagoer/IMDb can expose the same media type with different
+    # spellings (for example "tv series" and "tvSeries"). Compare a
+    # canonical form so valid TV-series results are not discarded.
+    def canonical_kind(value):
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
     allowed_kinds = (
-        {"tv series", "tv mini series"}
+        {"tvseries", "tvminiseries"}
         if expected_type == "tv"
-        else {"movie", "tv movie", "video movie"}
+        else {"movie", "tvmovie", "videomovie"}
     )
     ranked = []
+    rejected = []
     for item in results:
         candidate_title = item.get("title") or ""
         score = _title_match_score(title, candidate_title)
-        kind = str(item.get("kind") or "").lower()
+        raw_kind = str(item.get("kind") or "")
+        kind = canonical_kind(raw_kind)
         candidate_year = str(item.get("year") or "")
         if kind not in allowed_kinds:
+            rejected.append((candidate_title, raw_kind, "media type"))
             continue
         if score < (0.78 if len(title.split()) > 1 else 0.88):
+            rejected.append((candidate_title, raw_kind, "title score"))
             continue
         # A supplied year is a hard filter, not just a small ranking bonus.
         if year and candidate_year != year:
+            rejected.append((candidate_title, raw_kind, "year"))
             continue
         ranked.append((score, item))
+
+    if rejected:
+        logger.debug(
+            "IMDb candidates rejected for %r (%s): %s",
+            title, expected_type, rejected[:10],
+        )
 
     if not ranked:
         logger.info("IMDb found no reliable %s match for %r (%s)", expected_type, title, year or "year unknown")
